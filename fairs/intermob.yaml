@@ -1,4 +1,5 @@
 fair:
   name: Intermob 2026
 source:
+  platform: tuyap
   exhibitors_url: https://intermobistanbul.com/katilimci-listesi

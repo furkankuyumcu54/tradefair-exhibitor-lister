@@ -1,4 +1,6 @@
 import sys
+import importlib
+
 import yaml
 from pathlib import Path
 
@@ -14,6 +16,7 @@ def main():
         config = yaml.safe_load(f)
 
     fair_name = config["fair"]["name"]
+    platform = config["source"]["platform"]
     exhibitors_url = config["source"]["exhibitors_url"]
 
     output_dir = Path("output")
@@ -23,12 +26,11 @@ def main():
     scraped_path = str(output_dir / f"{slug}.xlsx")
     enriched_path = str(output_dir / f"{slug}-enriched.xlsx")
 
-    fair_key = fair_name.lower().split()[0]
-    if fair_key == "intermob":
-        from scrapers.intermob import scrape
-        scrape(exhibitors_url, scraped_path)
-    else:
-        print(f"Error: no scraper for fair '{fair_name}'")
+    try:
+        module = importlib.import_module(f"scrapers.{platform}")
+        module.scrape(exhibitors_url, scraped_path)
+    except ModuleNotFoundError:
+        print(f"Error: no scraper for platform '{platform}' (fair: '{fair_name}')")
         sys.exit(1)
 
     from enricher import enrich
