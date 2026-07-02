@@ -1,5 +1,6 @@
 import sys
 import importlib
+import importlib.util
 
 import yaml
 from pathlib import Path
@@ -26,12 +27,13 @@ def main():
     scraped_path = str(output_dir / f"{slug}.xlsx")
     enriched_path = str(output_dir / f"{slug}-enriched.xlsx")
 
-    try:
-        module = importlib.import_module(f"scrapers.{platform}")
-        module.scrape(exhibitors_url, scraped_path)
-    except ModuleNotFoundError:
+    spec = importlib.util.find_spec(f"scrapers.{platform}")
+    if spec is None:
         print(f"Error: no scraper for platform '{platform}' (fair: '{fair_name}')")
         sys.exit(1)
+
+    module = importlib.import_module(f"scrapers.{platform}")
+    module.scrape(exhibitors_url, scraped_path)
 
     from enricher import enrich
     enrich(scraped_path, enriched_path)
