@@ -51,6 +51,31 @@ def valid_detail_url(url):
     return bool(parsed.scheme and parsed.netloc)
 
 
+def fix_email(email):
+    fixed = email.strip().lower().rstrip(".")
+    return fixed if valid_email(fixed) else None
+
+
+def fix_phone(phone):
+    digits = re.sub(r"\D", "", phone)
+    if len(digits) < 8 or len(digits) > 15:
+        return None
+
+    if len(digits) == 10:
+        return f"+90 {digits[:3]} {digits[3:6]} {digits[6:8]} {digits[8:]}"
+    elif len(digits) == 11 and digits.startswith("0"):
+        d = digits[1:]
+        return f"+90 {d[:3]} {d[3:6]} {d[6:8]} {d[8:]}"
+    elif len(digits) == 12 and digits.startswith("90"):
+        d = digits[2:]
+        return f"+90 {d[:3]} {d[3:6]} {d[6:8]} {d[8:]}"
+    elif len(digits) == 13 and digits.startswith("90"):
+        d = digits[2:]
+        return f"+90 {d[:3]} {d[3:6]} {d[6:8]} {d[8:]}"
+    else:
+        return f"+{digits}"
+
+
 def normalize_domain(url):
     try:
         domain = urlparse(url).netloc.lower()
@@ -137,7 +162,48 @@ def collect_duplicates(rows):
     return dupe_groups
 
 
-def print_report(filepath, rows, issues, dupe_groups):
+FIXABLE = {"email": fix_email, "phone": fix_phone}
+
+
+def apply_fixes(rows, issues):
+    error_fixes = []
+    normalizations = {"phone": 0, "email": 0}
+
+    # Fix flagged issues
+    for cat, rn, name, val in issues:
+        fixer = FIXABLE.get(cat)
+        if not fixer:
+            continue
+        fixed = fixer(val)
+        if fixed is not None and fixed != val:
+            row_idx = rn - 2
+            if 0 <= row_idx < len(rows):
+                col = "Email" if cat == "email" else "Phone"
+                rows[row_idx][col] = fixed
+                error_fixes.append((cat, rn, name, val, fixed))
+
+    # Normalize all phone numbers (format consistently)
+    for idx, row in enumerate(rows):
+        phone = row.get("Phone", "")
+        if phone:
+            normed = fix_phone(phone)
+            if normed and normed != phone:
+                row["Phone"] = normed
+                normalizations["phone"] += 1
+
+    # Normalize all emails (lowercase, strip)
+    for idx, row in enumerate(rows):
+        email = row.get("Email", "")
+        if email:
+            normed = fix_email(email)
+            if normed and normed != email:
+                row["Email"] = normed
+                normalizations["email"] += 1
+
+    return error_fixes, normalizations
+
+
+def print_report(filepath, rows, issues, dupe_groups, error_fixes=None, normalizations=None):
     total = len(rows)
     total_format = len(issues)
     total_dupe_rows = sum(len(e[2]) for e in dupe_groups)
@@ -191,13 +257,38 @@ def print_report(filepath, rows, issues, dupe_groups):
     if not any_dupe:
         print("  (none)")
 
-    print()
+    if error_fixes:
+        print()
+        print(" FIXED ERRORS")
+        print("-" * 60)
+        for cat, rn, name, old, new in error_fixes:
+            label = "Email" if cat == "email" else "Phone"
+            print(f"  Row {rn}: {label}")
+            print(f"         Old: {old}")
+            print(f"         New: {new}")
+
+    if normalizations and (normalizations["phone"] or normalizations["email"]):
+        print()
+        print(" NORMALIZED")
+        print("-" * 60)
+        parts = []
+        if normalizations["phone"]:
+            parts.append(f"Phone: {normalizations['phone']}")
+        if normalizations["email"]:
+            parts.append(f"Email: {normalizations['email']}")
+        print("  " + ", ".join(parts))
+        print()
+
     print(" SUMMARY")
     print("-" * 60)
-    print(f"  Rows checked:     {total}")
-    print(f"  Format issues:    {total_format}")
-    print(f"  Duplicate groups: {len(dupe_groups)} ({total_dupe_rows} rows)")
-    print(f"  Total problems:   {total_format + total_dupe_rows}")
+    total_fixed = len(error_fixes) if error_fixes else 0
+    remaining = total_format - total_fixed
+    print(f"  Rows checked:       {total}")
+    print(f"  Format issues:      {total_format}")
+    print(f"  Errors fixed:       {total_fixed}")
+    print(f"  Normalized:         {sum(normalizations.values()) if normalizations else 0}")
+    print(f"  Duplicate groups:   {len(dupe_groups)} ({total_dupe_rows} rows)")
+    print(f"  Remaining errors:   {max(remaining, 0)}")
     print("=" * 60)
 
     return total_format > 0 or len(dupe_groups) > 0
@@ -210,10 +301,11 @@ HEADERS_EXPECTED = [
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python checker.py <enriched.xlsx>")
+        print("Usage: python checker.py <enriched.xlsx> [--fix]")
         sys.exit(1)
 
     filepath = sys.argv[1]
+    do_fix = "--fix" in sys.argv
 
     try:
         wb = load_workbook(filepath)
@@ -247,7 +339,25 @@ def main():
     issues = collect_format_issues(rows)
     dupe_groups = collect_duplicates(rows)
 
-    has_problems = print_report(filepath, rows, issues, dupe_groups)
+    error_fixes = None
+    normalizations = None
+    if do_fix:
+        error_fixes, normalizations = apply_fixes(rows, issues)
+
+    has_problems = print_report(filepath, rows, issues, dupe_groups, error_fixes, normalizations)
+
+    if do_fix:
+        base, ext = filepath.rsplit(".", 1)
+        out_path = f"{base}-fixed.{ext}"
+        from openpyxl import Workbook
+        wb_out = Workbook()
+        ws_out = wb_out.active
+        ws_out.title = "Exhibitors"
+        ws_out.append(HEADERS_EXPECTED)
+        for row in rows:
+            ws_out.append([row.get(h, "") for h in HEADERS_EXPECTED])
+        wb_out.save(out_path)
+        print(f"  Fixed file saved: {out_path}")
 
     sys.exit(1 if has_problems else 0)
 
