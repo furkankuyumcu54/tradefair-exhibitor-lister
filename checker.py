@@ -162,6 +162,73 @@ def collect_duplicates(rows):
     return dupe_groups
 
 
+SHORT_WORDS = {"a", "an", "as", "at", "by", "co", "de", "do", "el", "en", "es", "et", "go",
+               "hi", "ic", "id", "if", "in", "is", "it", "la", "le", "lo", "me", "my",
+               "no", "of", "on", "or", "re", "se", "si", "so", "to", "un", "up", "us", "we",
+               "ve", "veya", "ile", "bir", "san", "tic", "ltd", "sti", "ltdti",
+               "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
+               "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+               "sanayi", "ticaret", "anonim", "sirketi", "limited", "makina", "makine",
+               "plastik", "ambalaj", "otomotiv", "metal", "kimya", "insaat", "insaat",
+               "enerji", "elektrik", "elektronik", "tekstil", "gida", "urunleri",
+               "pazarlama", "danismanlik", "ithalat", "ihracat", "imalat"}
+
+LEGAL_SUFFIX_RE = re.compile(
+    r'\s+(ANONİM|A\.Ş\.|A\.Ş|SAN\.|TİC\.|LTD\.|ŞTİ\.|LTD|ŞTİ|GMBH|SPA|AG|CO|KG|AS|NV|SCA|SE|GMBH|GMBH\s+CO\s+KG)\s*$',
+    re.IGNORECASE
+)
+
+
+def normalize_company_name(name):
+    name = name.strip()
+    # Önce Türkçe karakterleri ASCII'ye çevir, sonra lower() yap
+    # (İ→i dönüşümü lower() öncesi yapılmazsa combining dot eklenir)
+    name = name.replace('İ', 'i').replace('I', 'i')
+    name = name.replace('ı', 'i').replace('ş', 's').replace('Ş', 's')
+    name = name.replace('ç', 'c').replace('Ç', 'c')
+    name = name.replace('ğ', 'g').replace('Ğ', 'g')
+    name = name.replace('ü', 'u').replace('Ü', 'u')
+    name = name.replace('ö', 'o').replace('Ö', 'o')
+    name = name.replace('â', 'a').replace('Â', 'a')
+    name = name.replace('î', 'i').replace('Î', 'i')
+    name = name.replace('û', 'u').replace('Û', 'u')
+    name = name.lower()
+    name = LEGAL_SUFFIX_RE.sub('', name)
+    name = re.sub(r'[^\w\s]', ' ', name)
+    words = re.findall(r'[a-zA-Z0-9]+', name)
+    return {w for w in words if w not in SHORT_WORDS and len(w) > 1}
+
+
+def token_similarity(tokens_a, tokens_b):
+    if not tokens_a or not tokens_b:
+        return 0.0
+    intersection = tokens_a & tokens_b
+    union = tokens_a | tokens_b
+    return len(intersection) / len(union)
+
+
+def collect_near_duplicates(rows):
+    near_groups = []
+    names = []
+    for idx, row in enumerate(rows):
+        name = row.get("Company Name", "")
+        rn = idx + 2
+        tokens = normalize_company_name(name) if name else set()
+        names.append((rn, name, tokens))
+
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            rn_a, name_a, tokens_a = names[i]
+            rn_b, name_b, tokens_b = names[j]
+            if not tokens_a or not tokens_b:
+                continue
+            sim = token_similarity(tokens_a, tokens_b)
+            if sim >= 0.7:
+                near_groups.append((rn_a, name_a, rn_b, name_b, sim))
+
+    return near_groups
+
+
 FIXABLE = {"email": fix_email, "phone": fix_phone}
 
 
@@ -203,7 +270,7 @@ def apply_fixes(rows, issues):
     return error_fixes, normalizations
 
 
-def print_report(filepath, rows, issues, dupe_groups, error_fixes=None, normalizations=None):
+def print_report(filepath, rows, issues, dupe_groups, near_dupes=None, error_fixes=None, normalizations=None):
     total = len(rows)
     total_format = len(issues)
     total_dupe_rows = sum(len(e[2]) for e in dupe_groups)
@@ -240,7 +307,7 @@ def print_report(filepath, rows, issues, dupe_groups, error_fixes=None, normaliz
         print("  (none)")
 
     print()
-    print(" DUPLICATES")
+    print(" EXACT DUPLICATES")
     print("-" * 60)
     dupe_labels = {
         "company": "Company Name",
@@ -256,6 +323,18 @@ def print_report(filepath, rows, issues, dupe_groups, error_fixes=None, normaliz
         print(f"         {rows_str}")
     if not any_dupe:
         print("  (none)")
+
+    if near_dupes:
+        print()
+        print(" NEAR-DUPLICATES (benzer isimler, >= %70 ortak kelime)")
+        print("-" * 60)
+        for rn_a, name_a, rn_b, name_b, sim in near_dupes[:20]:
+            print(f"  Row {rn_a} <-> Row {rn_b} (benzerlik: %{sim*100:.0f})")
+            print(f"    {name_a[:50]}")
+            print(f"    {name_b[:50]}")
+        if len(near_dupes) > 20:
+            print(f"  ... and {len(near_dupes) - 20} more")
+        print()
 
     if error_fixes:
         print()
@@ -283,12 +362,13 @@ def print_report(filepath, rows, issues, dupe_groups, error_fixes=None, normaliz
     print("-" * 60)
     total_fixed = len(error_fixes) if error_fixes else 0
     remaining = total_format - total_fixed
-    print(f"  Rows checked:       {total}")
-    print(f"  Format issues:      {total_format}")
-    print(f"  Errors fixed:       {total_fixed}")
-    print(f"  Normalized:         {sum(normalizations.values()) if normalizations else 0}")
-    print(f"  Duplicate groups:   {len(dupe_groups)} ({total_dupe_rows} rows)")
-    print(f"  Remaining errors:   {max(remaining, 0)}")
+    print(f"  Rows checked:         {total}")
+    print(f"  Format issues:        {total_format}")
+    print(f"  Errors fixed:         {total_fixed}")
+    print(f"  Normalized:           {sum(normalizations.values()) if normalizations else 0}")
+    print(f"  Exact duplicate rows: {total_dupe_rows}")
+    print(f"  Near-duplicate pairs: {len(near_dupes) if near_dupes else 0}")
+    print(f"  Remaining errors:     {max(remaining, 0)}")
     print("=" * 60)
 
     return total_format > 0 or len(dupe_groups) > 0
@@ -338,13 +418,14 @@ def main():
 
     issues = collect_format_issues(rows)
     dupe_groups = collect_duplicates(rows)
+    near_dupes = collect_near_duplicates(rows)
 
     error_fixes = None
     normalizations = None
     if do_fix:
         error_fixes, normalizations = apply_fixes(rows, issues)
 
-    has_problems = print_report(filepath, rows, issues, dupe_groups, error_fixes, normalizations)
+    has_problems = print_report(filepath, rows, issues, dupe_groups, near_dupes, error_fixes, normalizations)
 
     if do_fix:
         base, ext = filepath.rsplit(".", 1)

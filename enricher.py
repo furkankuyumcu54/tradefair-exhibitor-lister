@@ -289,28 +289,50 @@ def enrich_company(name, existing_website, existing_phone):
             print(f" not found")
 
     if not website:
-        name_clean = re.sub(r'[^\w\s]', ' ', name)
-        name_clean = re.sub(r'\s+(ANONİM|A\.Ş\.|A\.Ş|SAN\.|TİC\.|LTD\.|ŞTİ\.|LTD|ŞTİ|GMBH|SPA|AG|CO|KG|AS|NV|SCA|SE|GMBH|GMBH\s+CO\s+KG)\s*$', '', name_clean, flags=re.IGNORECASE)
-        name_clean = name_clean.strip().lower()
-        words = re.findall(r'[a-zA-Z0-9]+', name_clean)
-        name_lower = name.lower()
+        # Önce Türkçe karakterleri ASCII'ye çevir (lower() öncesi, İ→i sorununu önler)
+        name_normalized = name.replace('İ', 'i').replace('I', 'i')
+        name_normalized = name_normalized.replace('ı', 'i').replace('ş', 's').replace('Ş', 's')
+        name_normalized = name_normalized.replace('ç', 'c').replace('Ç', 'c')
+        name_normalized = name_normalized.replace('ğ', 'g').replace('Ğ', 'g')
+        name_normalized = name_normalized.replace('ü', 'u').replace('Ü', 'u')
+        name_normalized = name_normalized.replace('ö', 'o').replace('Ö', 'o')
+        name_normalized = name_normalized.replace('â', 'a').replace('Â', 'a')
+        name_normalized = name_normalized.replace('î', 'i').replace('Î', 'i')
+        name_normalized = name_normalized.replace('û', 'u').replace('Û', 'u')
+        name_normalized = name_normalized.lower()
 
+        # Legal suffix'leri noktalar dururken kaldır (önce)
+        name_clean = re.sub(r'\s+(ANONIM|A\.S\.|A\.S|SAN\.|TIC\.|LTD\.|STI\.|LTD|STI|GMBH|SPA|AG|CO|KG|AS|NV|SCA|SE|GMBH|GMBH\s+CO\s+KG)\s*$', '', name_normalized, flags=re.IGNORECASE)
+        # Sonra noktalama işaretlerini temizle
+        name_clean = re.sub(r'[^\w\s]', ' ', name_clean)
+        name_clean = name_clean.strip()
+
+        # Tüm kelimeleri çıkar
+        raw_words = re.findall(r'[a-zA-Z0-9]+', name_clean)
+
+        # Kısa/önemsiz kelimeleri filtrele
         SHORT_WORDS = {"a", "an", "as", "at", "by", "co", "de", "do", "el", "en", "es", "et", "go",
                        "hi", "ic", "id", "if", "in", "is", "it", "la", "le", "lo", "me", "my",
-                       "no", "of", "on", "or", "re", "se", "si", "so", "to", "un", "up", "us", "we"}
+                       "no", "of", "on", "or", "re", "se", "si", "so", "to", "un", "up", "us", "we",
+                       "ve", "veya", "ile", "bir", "san", "tic", "ltd", "sti", "ltdti", "as",
+                       "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
+                       "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"}
+
+        words = [w for w in raw_words if w not in SHORT_WORDS and len(w) > 1]
 
         candidates = set()
         if words:
-            first = words[0].lower()
-            if first not in SHORT_WORDS:
-                candidates.add(first)
+            # İlk kelime tek başına
+            candidates.add(words[0])
+            # Tüm anlamlı kelimeler bitişik
+            candidates.add(''.join(words))
             if len(words) > 1:
-                joined = first + words[1].lower()
-                if joined not in SHORT_WORDS:
-                    candidates.add(joined)
-                hyphenated = first + "-" + words[1].lower()
-                if hyphenated not in SHORT_WORDS:
-                    candidates.add(hyphenated)
+                # İlk iki kelime bitişik ve tireli
+                candidates.add(words[0] + words[1])
+                candidates.add(words[0] + '-' + words[1])
+            # Her bir anlamlı kelime ayrı ayrı
+            for w in words[1:]:
+                candidates.add(w)
 
         for domain_base in candidates:
             for ext in [".com.tr", ".com", ".de", ".it", ".no", ".eu", ".net", ".org"]:
@@ -318,12 +340,11 @@ def enrich_company(name, existing_website, existing_phone):
                 try:
                     r = SESSION.get(test_url, timeout=5)
                     if r.status_code < 400:
-                        # Verify: check if response mentions company name
+                        # Verify: sayfada şirketin en az 2 anlamlı kelimesi geçmeli
                         if "text/html" in r.headers.get("Content-Type", ""):
                             text_lower = r.text.lower()
-                            name_words = [w for w in name_lower.split() if len(w) > 3]
-                            name_match = any(w in text_lower for w in name_words[:3])
-                            if name_words and not name_match:
+                            meaningful_in_page = sum(1 for w in words[:5] if w in text_lower)
+                            if words and meaningful_in_page < min(2, len(words)):
                                 continue
                         print(f" found via domain guess: {test_url}")
                         website = test_url
@@ -413,12 +434,21 @@ def enrich(input_path, output_path):
         existing_website = clean_url(row.get("Website", ""))
         existing_phone = row.get("Phone", "")
 
-        slug = name.strip().lower()
-        slug = slug.replace('\u0131', 'i').replace('\u015f', 's').replace('\u00e7', 'c')
-        slug = slug.replace('\u011f', 'g').replace('\u00fc', 'u').replace('\u00f6', 'o')
-        slug = slug.replace('\u015e', 'S').replace('\u0130', 'I')
+        # Slug: Türkçe karakterleri lower() ÖNCESİ dönüştür
+        slug = name.strip()
+        slug = slug.replace('İ', 'i').replace('I', 'i')
+        slug = slug.replace('ı', 'i').replace('ş', 's').replace('Ş', 's')
+        slug = slug.replace('ç', 'c').replace('Ç', 'c')
+        slug = slug.replace('ğ', 'g').replace('Ğ', 'g')
+        slug = slug.replace('ü', 'u').replace('Ü', 'u')
+        slug = slug.replace('ö', 'o').replace('Ö', 'o')
+        slug = slug.replace('â', 'a').replace('Â', 'a')
+        slug = slug.lower()
         slug = re.sub(r'[^a-z0-9]', '-', slug)
-        slug = re.sub(r'-+', '-', slug).strip('-')[:60]
+        slug = re.sub(r'-+', '-', slug).strip('-')[:50]
+        detail_url = row.get("Detail Page URL", "")
+        url_hash = abs(hash(detail_url)) % 100000 if detail_url else idx
+        slug = f"{slug}-{url_hash}"
 
         if slug in done_slugs:
             print(f"[{idx + 1}/{len(rows)}] SKIP (checkpoint): {name[:50]}")
